@@ -6,7 +6,7 @@
    "dynamic_config" : 1,
    "generated_by" : "ExtUtils::MakeMaker version 6.68, CPAN::Meta::Converter version 2.120630",
    "license" : [
-      "unknown"
+      "perl_5"
    ],
    "meta-spec" : {
       "url" : "http://search.cpan.org/perldoc?CPAN::Meta::Spec",
@@ -33,7 +33,8 @@
       },
       "runtime" : {
          "requires" : {
-            "Encode" : "2.10"
+            "Encode" : "2.10",
+            "perl" : "5.007003"
          }
       }
    },
@@ -46,5 +47,5 @@
          "url" : "http://hatuka.nezumi.nu/repos/Encode-ISO2022/"
       }
    },
-   "version" : "0.000_06"
+   "version" : "0.000_07"
 }
