@@ -7,7 +7,7 @@ use 5.007003;
 use strict;
 use warnings;
 use base qw(Encode::Encoding);
-our $VERSION = '0.000_07';
+our $VERSION = '0.01_00';
 
 use Carp qw(carp croak);
 use XSLoader;
@@ -72,16 +72,43 @@ sub decode {
 	my ($func, $g_seq, $ls, $ss, $ss2, $ss3, $chunk) =
 	    ($1, $2, $3, $4, $5, $6, $7);
 
-	if (length $g_seq) {
-	    unless ($self->designate_dec($g_seq)) {
-		#XXX;
+	# process designation and invokation.
+	my $errSeq;
+	if ($g_seq) {
+	    unless (defined $self->designate_dec($g_seq)) {
+		$errSeq = $g_seq;
 	    }
-	} elsif (length $ls) {
-	    unless ($self->invoke_dec($ls)) {
-		#XXX;
+	} elsif ($ls) {
+	    unless (defined $self->invoke_dec($ls)) {
+		$errSeq = $ls;
 	    }
 	}
+	if ($errSeq) {
+	    if ($chk & $DIE_ON_ERR) {
+		croak sprintf $err_decode_nomap, $self->name, '\x', $errSeq;
+	    }
+	    if ($chk & $WARN_ON_ERR) {
+		carp sprintf $err_decode_nomap, $self->name, '\x', $errSeq;
+	    }
+	    if ($chk & $RETURN_ON_ERR) {
+		pos($str) -= length($errSeq) + length($chunk);
+		last; # CHUNKS
+	    }
 
+	    if ($chk_sub) {
+		$utf8 .= join '', map {
+		    $chk_sub->(ord $_)
+		} split(//, $errSeq . $chunk);
+	    } elsif ($chk & $PERLQQ) {
+		$utf8 .= sprintf '\x%*v02X', '\x', $errSeq . $chunk;
+	    } else {
+		$utf8 .= "\x{FFFD}" x length($chunk);
+	    }
+
+	    next; # CHUNKS
+	}
+
+	# process encoded elements
 	while (length $chunk) {
 	    my ($conv, $bytes);
 
@@ -96,6 +123,7 @@ sub decode {
 	    }
 
 	    $errChar = substr($chunk, 0, $bytes || 1);
+
 	    if ($chk & $DIE_ON_ERR) {
 		croak sprintf $err_decode_nomap, $self->name, '\x', $errChar;
 	    }
@@ -106,20 +134,28 @@ sub decode {
 		last CHUNKS;
 	    }
 
-	    substr($chunk, 0, $bytes || 1) = '';
+	    # Maybe erroneous designation: Force invoking CL and retry.
+	    if ($errChar =~ /^[\x00-\x1F]/) {
+		my @ccs = grep { $_->{cl} } @{$self->{CCS} || []};
+		if (@ccs) {
+		    $self->designate($ccs[0]);
+		    next;
+		}
+	    }
+
+	    substr($chunk, 0, length $errChar) = '';
 
 	    if ($chk_sub) {
-		$conv = $chk_sub->($errChar);
-		$conv = Encode::decode_utf8($conv)
-		    unless Encode::is_utf8($conv);
+		$utf8 .= join '', map {
+		    $chk_sub->(ord $_)
+		} split(//, $errChar);
 	    } elsif ($chk & $PERLQQ) {
-		$conv = sprintf '\x%*v02X', '\x', $errChar;
+		$utf8 .= sprintf '\x%*v02X', '\x', $errChar;
 	    } else {
-		$conv = "\x{FFFD}";
+		$utf8 .= "\x{FFFD}";
 	    }
-	    $utf8 .= $conv;
 	}
-    }
+    } # CHUNKS
     pos($str) -= length($chunk);
     $_[1] = substr($str, pos $str) unless $chk & $LEAVE_SRC;
 
@@ -131,7 +167,7 @@ sub _decode {
 
     my @ccs;
     my $conv;
-    my $bytes_min;
+    my $errLen;
 
     if ($ss) {
 	@ccs = grep {
@@ -146,41 +182,49 @@ sub _decode {
     }
 
     foreach my $ccs (@ccs) {
-	next unless $ccs and $ccs->{encoding}; #FIXME
+	my $bytes = $ccs->{bytes} || 1;
+	my $range =
+	    $ccs->{range} ? $ccs->{range} : $ccs->{gr} ? '\xA0-\xFF' : undef;
+	my $residue = '';
 
-	my $residue;
+	if ($range) {
+	    if ($chunk =~ /^[^$range]/) {
+		next;
+	    } elsif ($chunk =~ s/([^$range].*)$//s) {
+		$residue = $1;
+	    }
+	}
+
 	if ($ss) {
-	    $residue = substr($chunk, $ccs->{bytes} || 1);
-	    $chunk = substr($chunk, 0, $ccs->{bytes} || 1);
-	} else {
-	    $residue = '';
+	    $residue = substr($chunk, $bytes) . $residue;
+	    $chunk = substr($chunk, 0, $bytes);
 	}
 
 	if ($ccs->{gr}) {
-	    unless ($chunk =~ /^[\xA0-\xFF]/) {
-		$chunk .= $residue;
-		next;
-	    }
 	    $chunk =~ tr/\x20-\x7F\xA0-\xFF/\xA0-\xFF\x20-\x7F/;
 	    $conv = $ccs->{encoding}->decode($chunk, $FB_QUIET);
 	    $chunk =~ tr/\x20-\x7F\xA0-\xFF/\xA0-\xFF\x20-\x7F/;
 	} else {
 	    $conv = $ccs->{encoding}->decode($chunk, $FB_QUIET);
 	}
-	$bytes_min = $ccs->{bytes}
-	    if $ccs->{bytes} and
-	    (not defined $bytes_min or $ccs->{bytes} < $bytes_min);
+
+	if ($range and $chunk =~ /^([$range]{1,$bytes})/) {
+	    my $len = length $1;
+	    if (not defined $errLen or $len < $errLen) {
+		$errLen = $len;
+	    }
+	}
 
 	$chunk .= $residue;
 
 	if (defined $conv and length $conv) {
 	    $_[1] = $chunk;
-	    $_[2] = $_[3] = undef;
+	    $_[2] = undef;
 	    return $conv;
         }
     }
-    $_[2] = $_[3] = undef;
-    return (undef, $bytes_min);
+    $_[2] = undef;
+    return (undef, $errLen);
 }
 
 sub designate_dec {
@@ -251,6 +295,8 @@ sub encode {
 
 	if ($chk_sub) {
 	    $subChar = $chk_sub->(ord $errChar);
+	    $subChar = Encode::decode_utf8($subChar)
+		unless Encode::is_utf8($subChar);
 	} elsif ($chk & $PERLQQ) {
 	    $subChar = sprintf '\x{%04X}', ord $errChar;
 	} elsif ($chk & $XMLCREF) {
@@ -279,7 +325,28 @@ sub _encode {
     foreach my $ccs (@{$self->{CCS} || []}) {
 	next if $ccs->{dec_only};
 
-	my $conv = $ccs->{encoding}->encode($utf8, $FB_QUIET);
+	my $conv;
+
+	# CCS with single-shift should encode runs as short as possible.
+	# By now we support mapping from Unicode sequence up to 2 characters.
+	if (defined $ccs->{ss}) { # empty value is allowed
+	    my $bytes = $ccs->{bytes} || 1;
+	    my $mc = substr($utf8, 0, 2);
+	    $conv = $ccs->{encoding}->encode($mc, $FB_QUIET);
+	    if ($bytes < length $conv) {
+		$mc = substr($utf8, 0, 1);
+		$conv = $ccs->{encoding}->encode($mc, $FB_QUIET);
+		if (length $conv) {
+		    substr($utf8, 0, 1) = '';
+		}
+	    } elsif (length $conv == $bytes) {
+		$utf8 = $mc . substr($utf8, 2);
+	    } else {
+		undef $conv;
+	    }
+	} else {
+	    $conv = $ccs->{encoding}->encode($utf8, $FB_QUIET);
+	}
 	if (defined $conv and length $conv) {
 	    $_[1] = $utf8;
 	    return $self->designate($ccs) . $self->invoke($ccs, $conv);
@@ -332,18 +399,18 @@ sub designate {
 	} @ccs;
 
     # modify designation
-    foreach my $_ (@{$self->{_state}->{$g} || []}) {
-	delete $_->{_designated_to};
-	delete $_->{_invoked_to};
+    foreach my $ccs (@{$self->{_state}->{$g} || []}) {
+	delete $ccs->{_designated_to};
+	delete $ccs->{_invoked_to};
     }
     my %invoked = (gr => [], gl => []);
-    foreach my $_ (@ccs) {
-	$_->{_designated_to} = $g;
-	unless ($_->{ls} or $_->{ss}) {
-	    my $i = $_->{gr} ? 'gr' : 'gl';
+    foreach my $ccs (@ccs) {
+	$ccs->{_designated_to} = $g;
+	unless ($ccs->{ls} or $ccs->{ss}) {
+	    my $i = $ccs->{gr} ? 'gr' : 'gl';
 
-	    $_->{_invoked_to} = $i;
-	    push @{$invoked{$i}}, $_;
+	    $ccs->{_invoked_to} = $i;
+	    push @{$invoked{$i}}, $ccs;
 	}
     }
 
@@ -351,8 +418,8 @@ sub designate {
     foreach my $i (qw/gr gl/) {
 	next unless @{$invoked{$i} || []};
 
-	foreach my $_ (@{$self->{_state}->{$i} || []}) {
-	    delete $_->{_invoked_to};
+	foreach my $ccs (@{$self->{_state}->{$i} || []}) {
+	    delete $ccs->{_invoked_to};
 	}
 	$self->{_state}->{$i} = $invoked{$i};
     }
@@ -402,17 +469,41 @@ sub invoke {
 		not ($_->{_invoked_to} and $_->{_invoked_to} eq $i)
 	    } @ccs;
 
-	foreach my $_ (@{$self->{_state}->{$i} || []}) {
-	    delete $_->{_invoked_to};
+	foreach my $ccs (@{$self->{_state}->{$i} || []}) {
+	    delete $ccs->{_invoked_to};
 	}
-	foreach my $_ (@ccs) {
-	    $_->{_invoked_to} = $i;
+	foreach my $ccs (@ccs) {
+	    $ccs->{_invoked_to} = $i;
 	}
 
 	$self->{_state}->{$i} = [@ccs];
 	return $ccs->{ls} . $str;
     } else {
 	return $str;
+    }
+}
+
+# renew method
+
+sub renew {
+    my $self = shift;
+
+    my $clone = bless { map { _renew($_) } %$self } => ref($self);
+    $clone->{renewed}++;
+    return $clone;
+}
+
+sub _renew {
+    my $item = shift;
+
+    if (ref $item eq 'HASH') {
+	return { map { _renew($_) } %$item };
+    } elsif (ref $item eq 'ARRAY') {
+	return [ map { _renew($_) } @$item ];
+    } elsif (ref $item and $item->can("renew")) {
+	return $item->renew;
+    } else {
+	return $item;
     }
 }
 
@@ -459,6 +550,12 @@ Each item is a hash reference containing following items.
 Number of bytes to represent each character.
 Default is 1.
 
+=item cl => BOOLEAN
+
+If true value is set, this CCS includes map to/from code points between
+0/0 and 1/15.
+There should be one CCS with this flag to reset broken designation.
+
 =item dec_only => BOOLEAN
 
 If true value is set, this CCS will be used only for decoding.
@@ -473,10 +570,6 @@ Namely, they must be stateless and fixed-length conversion over 94^n or 96^n
 code tables.
 L<Encode::ISO2022::CCS> lists available CCSs.
 
-=item gr => BOOLEAN
-
-If true value is set, each character will be invoked to GR.
-
 =item g => STRING
 
 =item g_init => STRING
@@ -487,7 +580,7 @@ C<'g0'>, C<'g1'>, C<'g2'> or C<'g3'>.
 If C<g_init> is set, this CCS will be designated at beginning of coversion
 implicitly, and at end of conversion explicitly.
 
-If C<g> or C<g_init> is set and neither of C<ls> nor C<ss> is not set,
+If C<g> or C<g_init> is set and neither of C<ls> nor C<ss> is set,
 this CCS will be invoked when it is designated.
 
 If neither of C<g>, C<g_init>, C<ls> nor C<ss> is set,
@@ -497,6 +590,11 @@ this CCS is invoked always.
 
 Escape sequence to designate this CCS, if it can be designated explicitly.
 
+=item gr => BOOLEAN
+
+If true value is set, this CCS will be invoked to GR using 7-bit conversion
+table.
+
 =item ls => STRING
 
 =item ss => STRING
@@ -504,7 +602,14 @@ Escape sequence to designate this CCS, if it can be designated explicitly.
 Escape sequence or control character to invoke this CCS,
 if it should be invoked explicitly.
 
-If C<ss> is set, this CCS will be invoked for only one character.
+If C<ls> is set, this CCS will be invoked by locking-shift.
+If C<ss> is set, this CCS will be invoked by single-shift.
+
+=item range => STRING
+
+Possible range of encoded bytes.  General value is
+C<'\x21-\x7E'>, C<'\x20-\x7F'>, C<'\xA1-\xFE'> or C<'\xA0-\xFF'>.
+This is required for multibyte CCSs to detect broken multibyte sequences.
 
 =back
 

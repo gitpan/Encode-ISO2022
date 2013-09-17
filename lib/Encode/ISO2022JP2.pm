@@ -14,7 +14,8 @@ use Encode::KR;
 Encode::define_alias(qr/\biso-?2022-?jp-?2$/i => '"iso-2022-jp-2"');
 $Encode::Encoding{'iso-2022-jp-2'} = bless {
     'CCS' => [
-	{   encoding => $Encode::Encoding{'ascii'},
+	{   cl       => 1,
+	    encoding => $Encode::Encoding{'ascii'},
 	    g_init   => 'g0',
 	    g_seq    => "\e\x28\x42",
 	},
@@ -27,17 +28,20 @@ $Encode::Encoding{'iso-2022-jp-2'} = bless {
 	    encoding => $Encode::Encoding{'jis0208-raw'},
 	    g        => 'g0',
 	    g_seq    => "\e\x24\x42",
+	    range    => '\x21-\x7E',
 	},
 	{   bytes    => 2,
 	    dec_only => 1,
 	    encoding => $Encode::Encoding{'jis-x-0208-1978'},
 	    g        => 'g0',
 	    g_seq    => "\e\x24\x40",
+	    range    => '\x21-\x7E',
 	},
 	{   bytes    => 2,
 	    encoding => $Encode::Encoding{'jis-x-0212-ascii'},
 	    g        => 'g0',
 	    g_seq    => "\e\x24\x28\x44",
+	    range    => '\x21-\x7E',
 	},
 	# European
 	{   encoding => $Encode::Encoding{'iso-8859-1-right'},
@@ -55,12 +59,14 @@ $Encode::Encoding{'iso-2022-jp-2'} = bless {
 	    encoding => $Encode::Encoding{'gb2312-raw'},
 	    g        => 'g0',
 	    g_seq    => "\e\x24\x41",
+	    range    => '\x21-\x7E',
 	},
 	# Korean
 	{   bytes    => 2,
 	    encoding => $Encode::Encoding{'ksc5601-raw'},
 	    g        => 'g0',
 	    g_seq    => "\e\x24\x28\x43",
+	    range    => '\x21-\x7E',
 	},
 	# Nonstandard
 	{   encoding => $Encode::Encoding{'jis-x-0201-right'},
@@ -75,7 +81,7 @@ $Encode::Encoding{'iso-2022-jp-2'} = bless {
 
 sub mime_name { shift->{Name} }
 
-sub perlio_ok {0}
+sub needs_lines { 1 }
 
 1;
 __END__
@@ -104,10 +110,11 @@ This module provides iso2022-jp-2 encoding.
 
 To find out how to use this module in detail, see L<Encode>.
 
-=head1 CAVEAT
+=head2 Note on Implementation
 
-iso-2022-jp-2 may not be used with PerlIO layer,
-because it keeps designation state beyond lines.
+Though RFC 1554 allows designation of JIS X 0201 Latin set at end of the
+lines, it also states that such use of non-ASCII is "discouraged".
+So by this module, ASCII is always assumed at end of encoded lines.
 
 =head1 SEE ALSO
 
